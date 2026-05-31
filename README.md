@@ -7,11 +7,13 @@
 ## Features
 
 - Visual emoji markers next to React components (customizable)
+- Respects the `"use no memo"` / `"use no forget"` opt-out directive — opted-out functions are reported as skipped (⏭️) rather than failed
 - Hover tooltips with optimization details and error messages
 - Preview compiled output to see what the React Compiler generates
 - Generate reports for a full-project compilation snapshot
 - Commands to activate/deactivate markers or check individual files
 - Configurable babel plugin path for custom setups
+- Configurable [`compilationMode`](https://react.dev/reference/react-compiler/compilationMode) (`infer`, `annotation`, `syntax`, `all`) to match your project's React Compiler setup
 
 ## Supported IDEs
 

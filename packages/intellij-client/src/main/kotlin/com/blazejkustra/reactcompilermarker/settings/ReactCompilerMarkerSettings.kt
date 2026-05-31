@@ -15,12 +15,14 @@ class ReactCompilerMarkerSettings : PersistentStateComponent<ReactCompilerMarker
 
     class State {
         var isEnabled: Boolean = true
-        var successEmoji: String = "\u2728" // ✨
-        var errorEmoji: String = "\uD83D\uDEAB" // 🚫
+        var successEmoji: String = "✨" // ✨
+        var errorEmoji: String = "🚫" // 🚫
+        var skippedEmoji: String = "⏭️" // ⏭️
         var babelPluginPath: String = "node_modules/babel-plugin-react-compiler"
         var excludedDirectories: String = "node_modules, .git, dist, build, out, coverage, .next, .turbo"
         var supportedExtensions: String = ".js, .jsx, .ts, .tsx, .mjs, .cjs"
         var respectGitignore: Boolean = true
+        var compilationMode: String = "infer"
     }
 
     override fun getState(): State = myState
@@ -47,6 +49,12 @@ class ReactCompilerMarkerSettings : PersistentStateComponent<ReactCompilerMarker
             myState.errorEmoji = value
         }
 
+    var skippedEmoji: String
+        get() = myState.skippedEmoji
+        set(value) {
+            myState.skippedEmoji = value
+        }
+
     var babelPluginPath: String
         get() = myState.babelPluginPath
         set(value) {
@@ -71,6 +79,12 @@ class ReactCompilerMarkerSettings : PersistentStateComponent<ReactCompilerMarker
             myState.respectGitignore = value
         }
 
+    var compilationMode: String
+        get() = myState.compilationMode
+        set(value) {
+            myState.compilationMode = value
+        }
+
     val excludedDirectoriesList: List<String>
         get() = excludedDirectories.split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
@@ -80,10 +94,12 @@ class ReactCompilerMarkerSettings : PersistentStateComponent<ReactCompilerMarker
     fun toMap(): Map<String, Any?> = mapOf(
         "successEmoji" to successEmoji,
         "errorEmoji" to errorEmoji,
+        "skippedEmoji" to skippedEmoji,
         "babelPluginPath" to babelPluginPath,
         "excludedDirectories" to excludedDirectoriesList,
         "supportedExtensions" to supportedExtensionsList,
-        "respectGitignore" to respectGitignore
+        "respectGitignore" to respectGitignore,
+        "compilationMode" to compilationMode
     )
 
     companion object {

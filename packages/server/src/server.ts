@@ -19,6 +19,9 @@ import {
   getCompiledOutput,
   clearPluginCache,
   clearCompilationCache,
+  normalizeCompilationMode,
+  DEFAULT_COMPILATION_MODE,
+  type CompilationMode,
 } from "./checkReactCompiler";
 import { generateInlayHints } from "./inlayHints";
 import { debounce } from "./debounce";
@@ -46,13 +49,17 @@ const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 interface Settings {
   successEmoji: string | null;
   errorEmoji: string | null;
+  skippedEmoji: string | null;
   babelPluginPath: string;
+  compilationMode: CompilationMode;
 }
 
 let globalSettings: Settings = {
   successEmoji: "✨",
   errorEmoji: "🚫",
+  skippedEmoji: "⏭️",
   babelPluginPath: "node_modules/babel-plugin-react-compiler",
+  compilationMode: DEFAULT_COMPILATION_MODE,
 };
 
 // Tooltip format preference from client (markdown or html)
@@ -133,15 +140,23 @@ connection.onDidChangeConfiguration((change) => {
   const settings = change.settings?.reactCompilerMarker;
   if (settings) {
     const oldBabelPluginPath = globalSettings.babelPluginPath;
+    const oldCompilationMode = globalSettings.compilationMode;
     globalSettings = {
       successEmoji: settings.successEmoji ?? "✨",
       errorEmoji: settings.errorEmoji ?? "🚫",
+      skippedEmoji: settings.skippedEmoji ?? "⏭️",
       babelPluginPath: settings.babelPluginPath ?? "node_modules/babel-plugin-react-compiler",
+      compilationMode: normalizeCompilationMode(settings.compilationMode),
     };
 
     // Clear caches if babel plugin path changed
     if (oldBabelPluginPath !== globalSettings.babelPluginPath) {
       clearPluginCache();
+      clearCompilationCache();
+    }
+
+    // Compilation cache is keyed by source+filename only — invalidate on mode change
+    if (oldCompilationMode !== globalSettings.compilationMode) {
       clearCompilationCache();
     }
   }
@@ -175,19 +190,23 @@ connection.languages.inlayHint.on(async (params: InlayHintParams): Promise<Inlay
     try {
       const sourceCode = document.getText();
 
-      const { successfulCompilations, failedCompilations } = checkReactCompiler(
-        sourceCode,
-        fileNameForCompiler,
-        workspaceFolder,
-        globalSettings.babelPluginPath
-      );
+      const { successfulCompilations, failedCompilations, skippedCompilations } =
+        checkReactCompiler(
+          sourceCode,
+          fileNameForCompiler,
+          workspaceFolder,
+          globalSettings.babelPluginPath,
+          globalSettings.compilationMode
+        );
 
       return generateInlayHints(
         document,
         successfulCompilations,
         failedCompilations,
+        skippedCompilations,
         globalSettings.successEmoji,
         globalSettings.errorEmoji,
+        globalSettings.skippedEmoji,
         params.textDocument.uri,
         tooltipFormat,
         clientName
@@ -223,20 +242,24 @@ connection.onHover((params: HoverParams): Hover | null => {
   try {
     const sourceCode = document.getText();
 
-    const { successfulCompilations, failedCompilations } = checkReactCompiler(
-      sourceCode,
-      fileNameForCompiler,
-      workspaceFolder,
-      globalSettings.babelPluginPath
-    );
+    const { successfulCompilations, failedCompilations, skippedCompilations } =
+      checkReactCompiler(
+        sourceCode,
+        fileNameForCompiler,
+        workspaceFolder,
+        globalSettings.babelPluginPath,
+        globalSettings.compilationMode
+      );
 
     // Generate hints to find which components have hints on which lines
     const hints = generateInlayHints(
       document,
       successfulCompilations,
       failedCompilations,
+      skippedCompilations,
       globalSettings.successEmoji,
       globalSettings.errorEmoji,
+      globalSettings.skippedEmoji,
       params.textDocument.uri,
       tooltipFormat,
       clientName
@@ -289,7 +312,8 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
           document.getText(),
           fileUri,
           workspaceFolder,
-          globalSettings.babelPluginPath
+          globalSettings.babelPluginPath,
+          globalSettings.compilationMode
         );
         return { success: true, code: compiled };
       } catch (error: any) {
@@ -316,6 +340,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         const report = await generateReport({
           root: reportRoot,
           babelPluginPath: globalSettings.babelPluginPath,
+          compilationMode: normalizeCompilationMode(
+            options?.compilationMode ?? globalSettings.compilationMode
+          ),
           maxConcurrency: options?.maxConcurrency,
           includeExtensions: options?.includeExtensions,
           excludeDirs: options?.excludeDirs,
@@ -330,7 +357,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
             : undefined,
         });
         logMessage(
-          `Report generated: scanned=${report.totals.filesScanned} files=${report.totals.filesWithResults} success=${report.totals.successCount} failed=${report.totals.failedCount}`
+          `Report generated: scanned=${report.totals.filesScanned} files=${report.totals.filesWithResults} success=${report.totals.successCount} failed=${report.totals.failedCount} skipped=${report.totals.skippedCount}`
         );
         return { success: true, report };
       } catch (error: any) {
@@ -351,6 +378,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         const report = await generateReport({
           root: htmlReportRoot,
           babelPluginPath: globalSettings.babelPluginPath,
+          compilationMode: normalizeCompilationMode(
+            htmlOptions?.compilationMode ?? globalSettings.compilationMode
+          ),
           maxConcurrency: htmlOptions?.maxConcurrency,
           includeExtensions: htmlOptions?.includeExtensions,
           excludeDirs: htmlOptions?.excludeDirs,
@@ -368,6 +398,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         const emojis = {
           success: htmlOptions?.emojis?.success ?? globalSettings.successEmoji ?? "✨",
           error: htmlOptions?.emojis?.error ?? globalSettings.errorEmoji ?? "🚫",
+          skipped: htmlOptions?.emojis?.skipped ?? globalSettings.skippedEmoji ?? "⏭️",
         };
         const html = getReportHtml({
           data: treeData,
@@ -377,7 +408,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
           scriptExtra: htmlOptions?.scriptExtra,
         });
         logMessage(
-          `HTML report generated: scanned=${report.totals.filesScanned} files=${report.totals.filesWithResults} success=${report.totals.successCount} failed=${report.totals.failedCount}`
+          `HTML report generated: scanned=${report.totals.filesScanned} files=${report.totals.filesWithResults} success=${report.totals.successCount} failed=${report.totals.failedCount} skipped=${report.totals.skippedCount}`
         );
         return { success: true, html, report };
       } catch (error: any) {

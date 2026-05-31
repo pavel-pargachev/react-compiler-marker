@@ -27,14 +27,38 @@ export type LoggerEvent = {
   kind?: string;
   fnLoc: EventLocation;
   fnName?: string;
+  reason?: string;
+  loc?: EventLocation;
   detail?: Details & {
     options: Details;
   };
 };
 
+export type CompilationMode = "infer" | "annotation" | "syntax" | "all";
+
+export const DEFAULT_COMPILATION_MODE: CompilationMode = "infer";
+
+const VALID_COMPILATION_MODES: ReadonlySet<CompilationMode> = new Set([
+  "infer",
+  "annotation",
+  "syntax",
+  "all",
+]);
+
+export function normalizeCompilationMode(value: unknown): CompilationMode {
+  if (typeof value === "string" && VALID_COMPILATION_MODES.has(value as CompilationMode)) {
+    return value as CompilationMode;
+  }
+  if (value !== undefined && value !== null) {
+    throttledError(
+      `Invalid compilationMode "${String(value)}". Falling back to "${DEFAULT_COMPILATION_MODE}". Valid values: infer, annotation, syntax, all.`
+    );
+  }
+  return DEFAULT_COMPILATION_MODE;
+}
+
 const DEFAULT_COMPILER_OPTIONS = {
   noEmit: false,
-  compilationMode: "infer",
   panicThreshold: "none",
   environment: {
     enableTreatRefLikeIdentifiersAsRefs: true,
@@ -52,6 +76,7 @@ export function clearPluginCache(): void {
 interface CompilationResult {
   successfulCompilations: Array<LoggerEvent>;
   failedCompilations: Array<LoggerEvent>;
+  skippedCompilations: Array<LoggerEvent>;
 }
 
 const compilationCache = new LRUCache<CompilationResult>(100);
@@ -75,10 +100,12 @@ function runBabelPluginReactCompiler(
   BabelPluginReactCompiler: PluginObj | undefined,
   text: string,
   file: string,
-  language: "flow" | "typescript"
+  language: "flow" | "typescript",
+  compilationMode: CompilationMode
 ) {
   const successfulCompilations: Array<LoggerEvent> = [];
   const failedCompilations: Array<LoggerEvent> = [];
+  const skippedCompilations: Array<LoggerEvent> = [];
 
   const logger = {
     logEvent(filename: string | null, rawEvent: LoggerEvent) {
@@ -93,12 +120,16 @@ function runBabelPluginReactCompiler(
         case "PipelineError":
           failedCompilations.push(event);
           return;
+        case "CompileSkip":
+          skippedCompilations.push(event);
+          return;
       }
     },
   };
 
   const COMPILER_OPTIONS = {
     ...DEFAULT_COMPILER_OPTIONS,
+    compilationMode,
     logger,
     noEmit: true,
   };
@@ -126,6 +157,7 @@ function runBabelPluginReactCompiler(
   return {
     successfulCompilations,
     failedCompilations,
+    skippedCompilations,
   };
 }
 
@@ -169,7 +201,8 @@ export function checkReactCompiler(
   sourceCode: string,
   filename: string,
   workspaceFolder: string | undefined,
-  babelPluginPath: string
+  babelPluginPath: string,
+  compilationMode: CompilationMode = DEFAULT_COMPILATION_MODE
 ): CompilationResult {
   // Check cache first
   const cached = compilationCache.get(sourceCode, filename);
@@ -180,7 +213,7 @@ export function checkReactCompiler(
   const BabelPluginReactCompiler = importBabelPluginReactCompiler(workspaceFolder, babelPluginPath);
 
   if (!BabelPluginReactCompiler) {
-    return { successfulCompilations: [], failedCompilations: [] };
+    return { successfulCompilations: [], failedCompilations: [], skippedCompilations: [] };
   }
 
   try {
@@ -189,7 +222,8 @@ export function checkReactCompiler(
       BabelPluginReactCompiler,
       sourceCode,
       filename,
-      language
+      language,
+      compilationMode
     );
 
     // Cache the result
@@ -198,7 +232,11 @@ export function checkReactCompiler(
     return result;
   } catch (error: any) {
     throttledError(`Failed to compile the file. Please check the file content. ${error?.message}`);
-    const emptyResult: CompilationResult = { successfulCompilations: [], failedCompilations: [] };
+    const emptyResult: CompilationResult = {
+      successfulCompilations: [],
+      failedCompilations: [],
+      skippedCompilations: [],
+    };
     compilationCache.set(sourceCode, filename, emptyResult);
     return emptyResult;
   }
@@ -208,7 +246,8 @@ export async function getCompiledOutput(
   sourceCode: string,
   filename: string,
   workspaceFolder: string | undefined,
-  babelPluginPath: string
+  babelPluginPath: string,
+  compilationMode: CompilationMode = DEFAULT_COMPILATION_MODE
 ): Promise<string> {
   const BabelPluginReactCompiler = importBabelPluginReactCompiler(workspaceFolder, babelPluginPath);
 
@@ -227,7 +266,7 @@ export async function getCompiledOutput(
       filename,
       highlightCode: false,
       retainLines: true,
-      plugins: [[BabelPluginReactCompiler, DEFAULT_COMPILER_OPTIONS]],
+      plugins: [[BabelPluginReactCompiler, { ...DEFAULT_COMPILER_OPTIONS, compilationMode }]],
       sourceType: "module",
       configFile: false,
       babelrc: false,

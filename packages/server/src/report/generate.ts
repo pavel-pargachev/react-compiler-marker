@@ -3,7 +3,12 @@ import type { Dirent } from "fs";
 import os from "os";
 import path from "path";
 import ignore, { type Ignore } from "ignore";
-import { checkReactCompiler, LoggerEvent } from "../checkReactCompiler";
+import {
+  checkReactCompiler,
+  LoggerEvent,
+  type CompilationMode,
+  DEFAULT_COMPILATION_MODE,
+} from "../checkReactCompiler";
 
 /**
  * Full report generated from scanning a project with the React Compiler.
@@ -15,13 +20,16 @@ export interface ReactCompilerReport {
     filesWithResults: number;
     compiledFiles: number;
     failedFiles: number;
+    skippedFiles: number;
     successCount: number;
     failedCount: number;
+    skippedCount: number;
   };
   files: Array<{
     path: string;
     success: LoggerEvent[];
     failed: LoggerEvent[];
+    skipped: LoggerEvent[];
   }>;
   errors: Array<{
     path: string;
@@ -37,6 +45,8 @@ export interface ReportOptions {
   root: string;
   /** Path to the babel-plugin-react-compiler entry. */
   babelPluginPath: string;
+  /** React Compiler `compilationMode` (default: "infer"). */
+  compilationMode?: CompilationMode;
   /** Maximum number of files processed in parallel. */
   maxConcurrency?: number;
   /** File extensions to include (e.g. [".js", ".tsx"]). */
@@ -198,6 +208,7 @@ export async function generateReport(options: ReportOptions): Promise<ReactCompi
   const excludeDirs = new Set(options.excludeDirs ?? Array.from(DEFAULT_EXCLUDES));
   const maxConcurrency = options.maxConcurrency ?? Math.max(1, os.cpus().length - 1);
   const respectGitignore = options.respectGitignore ?? true;
+  const compilationMode = options.compilationMode ?? DEFAULT_COMPILATION_MODE;
 
   const files = await listSourceFiles(root, includeExtensions, excludeDirs, respectGitignore);
   const totalFiles = files.length;
@@ -220,16 +231,13 @@ export async function generateReport(options: ReportOptions): Promise<ReactCompi
   const results = await mapWithConcurrency(files, maxConcurrency, async (filePath) => {
     try {
       const sourceCode = await fs.readFile(filePath, "utf8");
-      const { successfulCompilations, failedCompilations } = checkReactCompiler(
-        sourceCode,
-        filePath,
-        root,
-        options.babelPluginPath
-      );
+      const { successfulCompilations, failedCompilations, skippedCompilations } =
+        checkReactCompiler(sourceCode, filePath, root, options.babelPluginPath, compilationMode);
       return {
         path: path.relative(root, filePath),
         success: successfulCompilations,
         failed: failedCompilations,
+        skipped: skippedCompilations,
       };
     } catch (error: any) {
       errors.push({
@@ -244,22 +252,34 @@ export async function generateReport(options: ReportOptions): Promise<ReactCompi
 
   const filesWithResults = results.filter(
     (result): result is NonNullable<typeof result> =>
-      !!result && (result.success.length > 0 || result.failed.length > 0)
+      !!result &&
+      (result.success.length > 0 || result.failed.length > 0 || result.skipped.length > 0)
   );
 
   const totals = filesWithResults.reduce(
     (acc, result) => {
       acc.successCount += result.success.length;
       acc.failedCount += result.failed.length;
+      acc.skippedCount += result.skipped.length;
       if (result.success.length > 0) {
         acc.compiledFiles += 1;
       }
       if (result.failed.length > 0) {
         acc.failedFiles += 1;
       }
+      if (result.skipped.length > 0) {
+        acc.skippedFiles += 1;
+      }
       return acc;
     },
-    { successCount: 0, failedCount: 0, compiledFiles: 0, failedFiles: 0 }
+    {
+      successCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      compiledFiles: 0,
+      failedFiles: 0,
+      skippedFiles: 0,
+    }
   );
 
   return {
@@ -269,8 +289,10 @@ export async function generateReport(options: ReportOptions): Promise<ReactCompi
       filesWithResults: filesWithResults.length,
       compiledFiles: totals.compiledFiles,
       failedFiles: totals.failedFiles,
+      skippedFiles: totals.skippedFiles,
       successCount: totals.successCount,
       failedCount: totals.failedCount,
+      skippedCount: totals.skippedCount,
     },
     files: filesWithResults,
     errors,
