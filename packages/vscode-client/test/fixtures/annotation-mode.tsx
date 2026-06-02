@@ -2,7 +2,7 @@ import React from "react";
 
 // Opted in via "use memo" — should compile under compilationMode: "annotation".
 export function OptedInComponent({ name }: { name: string }) {
-  "use memo";
+  'use memo';
 
   return <div>Hello {name}</div>;
 }

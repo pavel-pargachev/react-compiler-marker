@@ -6,10 +6,3 @@
 **/tsconfig.tsbuildinfo
 **/.DS_Store
 .idea
-
-# Neovim plugin files (copied during build)
-/lua
-/plugin
-/server
-**/zed-client/target
-**/zed-client/extension.wasm

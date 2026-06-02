@@ -1,0 +1,9 @@
+{
+  "scopeName": "source.react-compiler-preview",
+  "patterns": [
+    { "include": "source.tsx" },
+    { "include": "source.ts" },
+    { "include": "source.js.jsx" },
+    { "include": "source.js" }
+  ]
+}

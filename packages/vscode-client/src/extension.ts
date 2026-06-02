@@ -1,68 +1,109 @@
+import { DEFAULT_REACT_COMPILER_CONFIG_FILE } from "@react-compiler-marker/shared";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
+  DocumentSelector,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import type { ReactCompilerReport } from "@react-compiler-marker/server/src/report";
-import { buildReportTree } from "@react-compiler-marker/server/src/report";
-import { ReportPanel } from "./report/ReportPanel";
-import { ReportItem, ReportsTreeProvider } from "./sidebar/ReportsTreeProvider";
+import { CompiledPreviewManager } from "./compiledPreview";
+import { MarkerDecorationManager } from "./markerDecorations";
+import { REACT_DOCUMENT_SELECTOR } from "./reactDocuments";
 
-let client: LanguageClient;
+const languageClientState: {
+  client: LanguageClient | undefined;
+  startPromise: Promise<LanguageClient> | undefined;
+} = {
+  client: undefined,
+  startPromise: undefined,
+};
 
-// Output channel for logging
-const outputChannel = vscode.window.createOutputChannel("React Compiler Marker ✨");
+let markerDecorationManager: MarkerDecorationManager | undefined;
+
+const outputChannel = vscode.window.createOutputChannel("React Compiler Marker");
 
 function logMessage(message: string): void {
   const timestamp = new Date().toISOString();
   outputChannel.appendLine(`[${timestamp}] CLIENT LOG: ${message}`);
 }
 
-// Antigravity is an AI-focused VS Code fork (https://antigravity.dev)
-function isAntigravity(): boolean {
-  const appName = vscode.env.appName;
-  return appName.toLowerCase().includes("antigravity");
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function generateAIPrompt(
-  reason: string,
-  code: string,
-  filename: string,
-  startLine: number,
-  endLine: number
-): string {
-  const lineRange = startLine === endLine ? `line ${startLine}` : `lines ${startLine}-${endLine}`;
+type EditorRangeArgs = {
+  uri?: string;
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+};
 
-  return `I have a React component that the React Compiler couldn't optimize. Here's the issue:
+async function showEditorForUri(uri?: string): Promise<vscode.TextEditor | undefined> {
+  if (!uri) {
+    return vscode.window.activeTextEditor;
+  }
 
-**File:** ${filename}
-**Location:** ${lineRange}
-**Reason:** ${reason}
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(uri));
+  return vscode.window.showTextDocument(document, { preview: false });
+}
 
-**Code:**
-\`\`\`ts
-${code}
-\`\`\`
+function parseEditorRange(args: EditorRangeArgs): vscode.Range | undefined {
+  if (!args?.start || !args?.end) {
+    return undefined;
+  }
 
-Please help me fix this code so that the React Compiler can optimize it. The React Compiler automatically memoizes components and their dependencies, but it needs the code to follow certain patterns. Please provide the corrected code and explain what changes you made and why they help the React Compiler optimize the component.`;
+  const start = new vscode.Position(args.start.line, args.start.character);
+  const end = new vscode.Position(args.end.line, args.end.character);
+  return new vscode.Range(start, end);
+}
+
+async function revealEditorRange(args: EditorRangeArgs): Promise<void> {
+  const editor = await showEditorForUri(args?.uri);
+  if (!editor) {
+    vscode.window.showErrorMessage("No active editor to reveal selection.");
+    return;
+  }
+
+  const range = parseEditorRange(args);
+  if (!range) {
+    vscode.window.showErrorMessage("Invalid selection arguments.");
+    return;
+  }
+
+  editor.selection = new vscode.Selection(range.start, range.end);
+  editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+}
+
+async function ensureLanguageClientReady(): Promise<LanguageClient> {
+  const { startPromise } = languageClientState;
+  if (!startPromise) {
+    throw new Error("React Compiler Marker language client is not initialized.");
+  }
+
+  const client = await startPromise;
+  if (!client.isRunning()) {
+    throw new Error("React Compiler Marker language client is not running.");
+  }
+
+  return client;
+}
+
+async function executeServerCommand(command: string, args?: unknown[]): Promise<unknown> {
+  const client = await ensureLanguageClientReady();
+  return client.sendRequest("workspace/executeCommand", { command, arguments: args });
 }
 
 export function activate(context: vscode.ExtensionContext): void {
   logMessage("react-compiler-marker is being activated!");
 
-  // Load the persisted `isActivated` state or default to `true`
-  let isActivated = context.globalState.get<boolean>("isActivated", true);
+  const activation = {
+    isActivated: context.globalState.get<boolean>("isActivated", true),
+  };
 
-  // The server is located in the dist folder after bundling
   const serverModule = context.asAbsolutePath(path.join("dist", "server.js"));
-
-  // Debug options for the server
   const debugOptions = { execArgv: ["--nolazy", "--inspect=6009"] };
 
-  // Server options
   const serverOptions: ServerOptions = {
     run: { module: serverModule, transport: TransportKind.ipc },
     debug: {
@@ -72,14 +113,8 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
 
-  // Client options
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [
-      { scheme: "file", language: "javascript" },
-      { scheme: "file", language: "typescript" },
-      { scheme: "file", language: "javascriptreact" },
-      { scheme: "file", language: "typescriptreact" },
-    ],
+    documentSelector: REACT_DOCUMENT_SELECTOR as DocumentSelector,
     synchronize: {
       configurationSection: "reactCompilerMarker",
     },
@@ -87,138 +122,117 @@ export function activate(context: vscode.ExtensionContext): void {
     markdown: {
       isTrusted: true,
     },
+    initializationOptions: {
+      isActivated: activation.isActivated,
+    },
   };
 
-  // Create the language client and start it
-  client = new LanguageClient(
+  const client = new LanguageClient(
     "reactCompilerMarker",
     "React Compiler Marker",
     serverOptions,
     clientOptions
   );
+  languageClientState.client = client;
 
-  // Start the client (this also starts the server)
-  client.start().then(() => {
-    logMessage("React Compiler Marker LSP client started");
+  languageClientState.startPromise = client
+    .start()
+    .then(() => {
+      logMessage("React Compiler Marker LSP client started");
 
-    // Send initial activation state to server
-    if (!isActivated) {
-      client.sendRequest("workspace/executeCommand", {
-        command: "react-compiler-marker/deactivate",
-      });
+      markerDecorationManager = new MarkerDecorationManager(client);
+      context.subscriptions.push(markerDecorationManager);
+      markerDecorationManager.setActivated(activation.isActivated);
+      void markerDecorationManager.refreshAllOpenDocuments();
+
+      return client;
+    })
+    .catch((error: unknown) => {
+      const message = errorMessage(error);
+      logMessage(`Failed to start LSP client: ${message}`);
+      void vscode.window.showErrorMessage(`React Compiler Marker failed to start: ${message}`);
+      throw error;
+    });
+
+  let configWatchers: vscode.Disposable = vscode.Disposable.from();
+
+  const updateConfigFileWatcher = () => {
+    configWatchers.dispose();
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const configFile =
+      vscode.workspace
+        .getConfiguration("reactCompilerMarker")
+        .get<string>("configFile") ?? DEFAULT_REACT_COMPILER_CONFIG_FILE;
+
+    if (!workspaceFolders?.length) {
+      configWatchers = vscode.Disposable.from();
+      return;
     }
-  });
 
-  // Set up sidebar tree view
-  const storageUri = context.storageUri ?? context.globalStorageUri;
-  const reportsProvider = new ReportsTreeProvider(storageUri);
-  const treeView = vscode.window.createTreeView("react-compiler-marker.reportsView", {
-    treeDataProvider: reportsProvider,
-  });
-  context.subscriptions.push(treeView);
+    const reloadReactCompilerConfig = () => {
+      void executeServerCommand("react-compiler-marker/reloadReactCompilerConfig").catch(() => {
+        // Client not ready or server unavailable.
+      });
+    };
 
-  // Load reports and set initial badge
-  reportsProvider.refresh().then(() => {
-    const failedCount = reportsProvider.getLatestFailedCount();
-    treeView.badge =
-      failedCount > 0
-        ? { value: failedCount, tooltip: `${failedCount} failed component(s) in latest report` }
-        : undefined;
-  });
+    const watchers: vscode.FileSystemWatcher[] = [];
+    for (const workspaceFolder of workspaceFolders) {
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(workspaceFolder, configFile)
+      );
+      watcher.onDidChange(reloadReactCompilerConfig);
+      watcher.onDidCreate(reloadReactCompilerConfig);
+      watcher.onDidDelete(reloadReactCompilerConfig);
+      watchers.push(watcher);
+    }
 
-  const updateBadge = () => {
-    const failedCount = reportsProvider.getLatestFailedCount();
-    treeView.badge =
-      failedCount > 0
-        ? { value: failedCount, tooltip: `${failedCount} failed component(s) in latest report` }
-        : undefined;
+    configWatchers = vscode.Disposable.from(...watchers);
   };
 
-  // Register commands
-  registerCommands(
-    context,
-    isActivated,
-    (value: boolean) => {
-      isActivated = value;
-      context.globalState.update("isActivated", value);
-    },
-    async () => {
-      await reportsProvider.refresh();
-      updateBadge();
-    }
-  );
-
-  // Register refreshReports command
+  updateConfigFileWatcher();
   context.subscriptions.push(
-    vscode.commands.registerCommand("react-compiler-marker.refreshReports", async () => {
-      await reportsProvider.refresh();
-      updateBadge();
+    { dispose: () => configWatchers.dispose() },
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("reactCompilerMarker.configFile")) {
+        updateConfigFileWatcher();
+      }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      updateConfigFileWatcher();
     })
   );
 
-  // Register openReport command
-  context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "react-compiler-marker.openReport",
-      async (reportUri: vscode.Uri) => {
-        try {
-          const content = await vscode.workspace.fs.readFile(reportUri);
-          const report = JSON.parse(Buffer.from(content).toString("utf8")) as ReactCompilerReport;
-          const treeData = buildReportTree(report);
-          const config = vscode.workspace.getConfiguration("reactCompilerMarker");
-          const emojis = {
-            success: config.get<string>("successEmoji") ?? "\u2728",
-            error: config.get<string>("errorEmoji") ?? "\uD83D\uDEAB",
-            skipped: config.get<string>("skippedEmoji") ?? "\u23ED\uFE0F",
-          };
-          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-          if (!workspaceFolder) {
-            vscode.window.showErrorMessage("Open a workspace folder to view the report.");
-            return;
-          }
-          ReportPanel.createOrShow(workspaceFolder.uri, treeData, emojis);
-        } catch (error: any) {
-          vscode.window.showErrorMessage(`Failed to open report: ${error?.message ?? error}`);
-        }
-      }
-    )
-  );
+  const compiledPreviewManager = new CompiledPreviewManager(async (sourceUri) => {
+    return (await executeServerCommand("react-compiler-marker/getCompiledOutput", [
+      sourceUri,
+    ])) as { success: boolean; code?: string; error?: string };
+  });
+  context.subscriptions.push(compiledPreviewManager);
 
-  // Register deleteReport command
-  context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "react-compiler-marker.deleteReport",
-      async (item: ReportItem) => {
-        const confirm = await vscode.window.showWarningMessage(
-          "Are you sure you want to delete this report?",
-          { modal: true },
-          "Delete"
-        );
-        if (confirm !== "Delete") {
-          return;
-        }
-        try {
-          await reportsProvider.deleteReport(item.reportUri);
-          updateBadge();
-        } catch (error: any) {
-          vscode.window.showErrorMessage(`Failed to delete report: ${error?.message ?? error}`);
-        }
-      }
-    )
-  );
+  registerCommands(context, activation, compiledPreviewManager, async (value: boolean) => {
+    activation.isActivated = value;
+    await context.globalState.update("isActivated", value);
+    markerDecorationManager?.setActivated(value);
+  });
 
-  logMessage("React Compiler Marker ✨: Initialization complete.");
+  context.subscriptions.push({
+    dispose: () => {
+      languageClientState.client = undefined;
+      languageClientState.startPromise = undefined;
+      markerDecorationManager = undefined;
+    },
+  });
+
+  logMessage("React Compiler Marker: Initialization complete.");
 }
 
 function registerCommands(
   context: vscode.ExtensionContext,
-  initialIsActivated: boolean,
-  setIsActivated: (value: boolean) => void,
-  onReportGenerated?: () => Promise<void>
+  activation: { isActivated: boolean },
+  compiledPreviewManager: CompiledPreviewManager,
+  setIsActivated: (value: boolean) => Promise<void>
 ): void {
-  let isActivated = initialIsActivated;
-
-  // Register the Refresh command
   const refreshCommand = vscode.commands.registerCommand(
     "react-compiler-marker.checkOnce",
     async () => {
@@ -228,65 +242,87 @@ function registerCommands(
         return;
       }
 
-      await client.sendRequest("workspace/executeCommand", {
-        command: "react-compiler-marker/checkOnce",
-      });
+      if (!activation.isActivated) {
+        vscode.window.showInformationMessage(
+          "React Compiler Marker is deactivated. Activate it to refresh markers."
+        );
+        return;
+      }
 
-      vscode.window.showInformationMessage("React Compiler Markers refreshed ✨");
+      try {
+        await executeServerCommand("react-compiler-marker/checkOnce");
+
+        const activeEditorAfterRefresh = vscode.window.activeTextEditor;
+        if (activeEditorAfterRefresh) {
+          markerDecorationManager?.refreshEditor(activeEditorAfterRefresh);
+        }
+
+        vscode.window.showInformationMessage("React Compiler Markers refreshed");
+      } catch (error: unknown) {
+        vscode.window.showErrorMessage(
+          `Failed to refresh React Compiler markers: ${errorMessage(error)}`
+        );
+      }
     }
   );
 
-  // Register the Activate command
   const activateCommand = vscode.commands.registerCommand(
     "react-compiler-marker.activate",
     async () => {
-      if (isActivated) {
-        vscode.window.showInformationMessage("React Compiler Marker ✨ is already activated.");
+      if (activation.isActivated) {
+        vscode.window.showInformationMessage("React Compiler Marker is already activated.");
         return;
       }
 
-      await client.sendRequest("workspace/executeCommand", {
-        command: "react-compiler-marker/activate",
-      });
-
-      isActivated = true;
-      setIsActivated(true);
-
-      vscode.window.showInformationMessage("React Compiler Marker ✨ activated!");
+      try {
+        await executeServerCommand("react-compiler-marker/activate");
+        await setIsActivated(true);
+        vscode.window.showInformationMessage("React Compiler Marker activated!");
+      } catch (error: unknown) {
+        vscode.window.showErrorMessage(
+          `Failed to activate React Compiler Marker: ${errorMessage(error)}`
+        );
+      }
     }
   );
 
-  // Register the Deactivate command
   const deactivateCommand = vscode.commands.registerCommand(
     "react-compiler-marker.deactivate",
     async () => {
-      if (!isActivated) {
-        vscode.window.showInformationMessage("React Compiler Marker ✨ is already deactivated.");
+      if (!activation.isActivated) {
+        vscode.window.showInformationMessage("React Compiler Marker is already deactivated.");
         return;
       }
 
-      await client.sendRequest("workspace/executeCommand", {
-        command: "react-compiler-marker/deactivate",
-      });
-
-      isActivated = false;
-      setIsActivated(false);
-
-      vscode.window.showInformationMessage("React Compiler Marker ✨ deactivated!");
+      try {
+        await executeServerCommand("react-compiler-marker/deactivate");
+        await setIsActivated(false);
+        vscode.window.showInformationMessage("React Compiler Marker deactivated!");
+      } catch (error: unknown) {
+        vscode.window.showErrorMessage(
+          `Failed to deactivate React Compiler Marker: ${errorMessage(error)}`
+        );
+      }
     }
   );
 
-  // Register the Preview Compiled Output command
   const previewCompiled = vscode.commands.registerCommand(
     "react-compiler-marker.previewCompiled",
-    async () => {
-      const activeEditor = vscode.window.activeTextEditor;
-      if (!activeEditor) {
+    async (args?: { uri?: string }) => {
+      if (!activation.isActivated) {
+        vscode.window.showErrorMessage(
+          "React Compiler Marker is deactivated. Activate it to preview compiled output."
+        );
+        return;
+      }
+
+      const editor = await showEditorForUri(args?.uri);
+      if (!editor) {
         vscode.window.showErrorMessage("No active editor to preview.");
         return;
       }
 
-      const document = activeEditor.document;
+      const document = editor.document;
       const filename = document.fileName;
 
       if (!filename || document.isUntitled) {
@@ -295,227 +331,37 @@ function registerCommands(
       }
 
       try {
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: "React Compiler: Compiling...",
-            cancellable: false,
-          },
-          async () => {
-            const result = (await client.sendRequest("workspace/executeCommand", {
-              command: "react-compiler-marker/getCompiledOutput",
-              arguments: [document.uri.toString()],
-            })) as { success: boolean; code?: string; error?: string };
-
-            if (!result.success || !result.code) {
-              throw new Error(result.error || "Compilation failed");
-            }
-
-            const compiledDoc = await vscode.workspace.openTextDocument({
-              language: "typescriptreact",
-              content: result.code,
-            });
-            await vscode.window.showTextDocument(compiledDoc, {
-              preview: true,
-              viewColumn: vscode.ViewColumn.Beside,
-            });
-            await vscode.commands.executeCommand("editor.action.formatDocument");
-          }
-        );
-      } catch (error: any) {
+        await compiledPreviewManager.open(document);
+      } catch (error: unknown) {
         vscode.window.showErrorMessage(
-          `Failed to compile the current file: ${error?.message ?? error}`
+          `Failed to compile the current file: ${errorMessage(error)}`
         );
       }
     }
   );
 
-  const generateReport = vscode.commands.registerCommand(
-    "react-compiler-marker.generateReport",
-    async () => {
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!workspaceFolder) {
-        vscode.window.showErrorMessage("Open a workspace folder to generate a report.");
-        return;
-      }
-
-      const storageBase = context.storageUri ?? workspaceFolder.uri;
-      if (!storageBase) {
-        vscode.window.showErrorMessage("No storage or workspace folder available.");
-        return;
-      }
-
-      const reportId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      try {
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: "React Compiler: Generating report...",
-            cancellable: false,
-          },
-          async (progress) => {
-            let lastProcessed = 0;
-            const progressDisposable = client.onNotification(
-              "react-compiler-marker/reportProgress",
-              (payload: { reportId: string; processed: number; total: number }) => {
-                if (payload.reportId !== reportId) {
-                  return;
-                }
-                if (payload.total === 0) {
-                  progress.report({ message: "No matching files found", increment: 100 });
-                  return;
-                }
-                const delta = payload.processed - lastProcessed;
-                if (delta <= 0) {
-                  return;
-                }
-                const increment = (delta / payload.total) * 100;
-                lastProcessed = payload.processed;
-                progress.report({
-                  message: `Scanning ${payload.processed}/${payload.total} files`,
-                  increment,
-                });
-              }
-            );
-
-            try {
-              const config = vscode.workspace.getConfiguration("reactCompilerMarker");
-              const result = (await client.sendRequest("workspace/executeCommand", {
-                command: "react-compiler-marker/generateReport",
-                arguments: [
-                  {
-                    root: workspaceFolder.uri.fsPath,
-                    reportId,
-                    excludeDirs: config.get<string[]>("excludedDirectories"),
-                    includeExtensions: config.get<string[]>("supportedExtensions"),
-                    respectGitignore: config.get<boolean>("respectGitignore"),
-                  },
-                ],
-              })) as { success: boolean; report?: ReactCompilerReport; error?: string };
-
-              if (!result.success || !result.report) {
-                throw new Error(result.error || "Report generation failed");
-              }
-
-              // Save raw JSON for reference
-              const reportJson = JSON.stringify(result.report, null, 2);
-              const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-              const reportsDir = vscode.Uri.joinPath(storageBase, "react-compiler-marker");
-              await vscode.workspace.fs.createDirectory(reportsDir);
-              const reportUri = vscode.Uri.joinPath(reportsDir, `report-${timestamp}.json`);
-              await vscode.workspace.fs.writeFile(reportUri, Buffer.from(reportJson, "utf8"));
-
-              // Notify sidebar to refresh
-              if (onReportGenerated) {
-                await onReportGenerated();
-              }
-
-              // Open visual report panel
-              const treeData = buildReportTree(result.report);
-              const emojis = {
-                success: config.get<string>("successEmoji") ?? "✨",
-                error: config.get<string>("errorEmoji") ?? "🚫",
-                skipped: config.get<string>("skippedEmoji") ?? "⏭️",
-              };
-              ReportPanel.createOrShow(workspaceFolder.uri, treeData, emojis);
-            } finally {
-              progressDisposable.dispose();
-            }
-          }
-        );
-      } catch (error: any) {
-        vscode.window.showErrorMessage(`Failed to generate report: ${error?.message ?? error}`);
-      }
-    }
-  );
-
-  // Register the Reveal Selection command
   const revealSelectionCmd = vscode.commands.registerCommand(
     "react-compiler-marker.revealSelection",
-    (args: {
-      start: { line: number; character: number };
-      end: { line: number; character: number };
-    }) => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        vscode.window.showErrorMessage("No active editor to reveal selection.");
-        return;
-      }
-
-      if (!args?.start || !args?.end) {
-        vscode.window.showErrorMessage("Invalid selection arguments.");
-        return;
-      }
-
-      const start = new vscode.Position(args.start.line, args.start.character);
-      const end = new vscode.Position(args.end.line, args.end.character);
-      const range = new vscode.Range(start, end);
-
-      editor.selection = new vscode.Selection(start, end);
-      editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
-    }
+    (args: EditorRangeArgs) => revealEditorRange(args)
   );
 
-  // Register the Fix with AI command
-  const fixWithAICmd = vscode.commands.registerCommand(
-    "react-compiler-marker.fixWithAI",
-    async ({
-      reason,
-      filename,
-      startLine,
-      endLine,
-    }: {
-      reason: string;
-      filename: string;
-      startLine: number;
-      endLine: number;
-    }) => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        vscode.window.showErrorMessage("No active editor to reveal selection.");
-        return;
-      }
-
-      const errorStartLine = Math.max(0, startLine - 2);
-      const errorEndLine = Math.min(editor.document.lineCount - 1, endLine + 2);
-      const code = editor.document.getText(
-        new vscode.Range(
-          new vscode.Position(errorStartLine, 0),
-          new vscode.Position(errorEndLine, editor.document.lineAt(errorEndLine).text.length)
-        )
-      );
-
-      const prompt = generateAIPrompt(reason, code, filename, startLine, endLine);
-
-      if (isAntigravity()) {
-        await vscode.env.clipboard.writeText(prompt);
-        await vscode.commands.executeCommand(
-          "antigravity.prioritized.chat.openNewConversation",
-          prompt
-        );
-        await vscode.window.showInformationMessage("Prompt copied. Press CMD+V in the chat.");
-      } else {
-        await vscode.commands.executeCommand("workbench.action.chat.open", prompt);
-      }
-    }
-  );
-
-  // Push all commands to the context's subscriptions
   context.subscriptions.push(
     refreshCommand,
     activateCommand,
     deactivateCommand,
     previewCompiled,
-    generateReport,
-    revealSelectionCmd,
-    fixWithAICmd
+    revealSelectionCmd
   );
 
-  logMessage("React Compiler Marker ✨: Commands registered.");
+  logMessage("React Compiler Marker: Commands registered.");
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  logMessage("React Compiler Marker ✨ deactivating...");
+  logMessage("React Compiler Marker deactivating...");
+  const client = languageClientState.client;
+  languageClientState.client = undefined;
+  languageClientState.startPromise = undefined;
+  markerDecorationManager = undefined;
   if (!client) {
     return undefined;
   }

@@ -5,11 +5,7 @@ import {
   InitializeParams,
   TextDocumentSyncKind,
   InitializeResult,
-  InlayHintParams,
-  InlayHint,
   ExecuteCommandParams,
-  HoverParams,
-  Hover,
 } from "vscode-languageserver/node";
 
 import { TextDocument } from "vscode-languageserver-textdocument";
@@ -19,58 +15,46 @@ import {
   getCompiledOutput,
   clearPluginCache,
   clearCompilationCache,
-  normalizeCompilationMode,
-  DEFAULT_COMPILATION_MODE,
-  type CompilationMode,
 } from "./checkReactCompiler";
-import { generateInlayHints } from "./inlayHints";
-import { debounce } from "./debounce";
-import { shouldEnableHover } from "./clientUtils";
+import { clearReactCompilerConfigCache } from "./reactCompilerConfig";
+import {
+  DEFAULT_BABEL_PLUGIN_PATH,
+  DEFAULT_REACT_COMPILER_CONFIG_FILE,
+  MARKERS_CHANGED,
+  MARKER_REQUEST,
+  isReactLanguageId,
+} from "@react-compiler-marker/shared";
+import { generateMarkers } from "./markers";
 
 import packageJson from "../package.json";
-import { generateReport, buildReportTree, getReportHtml } from "./report/index";
 const { version } = packageJson;
 
-// Determine the connection type based on command line arguments
-// - stdio: when started with --stdio flag (for WebStorm, Neovim, Sublime, etc.)
-// - Node IPC: when started by VS Code language client (default)
-const useStdio = process.argv.includes("--stdio");
-
-// Create a connection for the server
-// ProposedFeatures.all enables all LSP features including inlay hints
-const connection = useStdio
-  ? createConnection(ProposedFeatures.all, process.stdin, process.stdout)
-  : createConnection(ProposedFeatures.all);
+// Create a connection for the server (Node IPC, started by the VS Code language client)
+const connection = createConnection(ProposedFeatures.all);
 
 // Create a document manager
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
 // Store settings
 interface Settings {
-  successEmoji: string | null;
-  errorEmoji: string | null;
-  skippedEmoji: string | null;
   babelPluginPath: string;
-  compilationMode: CompilationMode;
+  configFile: string;
 }
 
 let globalSettings: Settings = {
-  successEmoji: "✨",
-  errorEmoji: "🚫",
-  skippedEmoji: "⏭️",
-  babelPluginPath: "node_modules/babel-plugin-react-compiler",
-  compilationMode: DEFAULT_COMPILATION_MODE,
+  babelPluginPath: DEFAULT_BABEL_PLUGIN_PATH,
+  configFile: DEFAULT_REACT_COMPILER_CONFIG_FILE,
 };
 
-// Tooltip format preference from client (markdown or html)
-type TooltipFormat = "markdown" | "html";
-let tooltipFormat: TooltipFormat = "markdown";
-
-// Store activation state
+// Store activation state (synced from client initializationOptions)
 let isActivated = true;
 
-// Store workspace folder
-let workspaceFolder: string | undefined;
+interface ClientInitializationOptions {
+  isActivated?: boolean;
+}
+
+let workspaceFolders: string[] = [];
+let hasWorkspaceFolderCapability = false;
 
 // Store client name
 let clientName: string | undefined;
@@ -85,54 +69,184 @@ function logError(error: string): void {
   connection.console.error(`[${timestamp}] SERVER ERROR: ${error}`);
 }
 
-connection.onInitialize((params: InitializeParams): InitializeResult => {
-  const workspaceFolderUri = params.workspaceFolders?.[0]?.uri;
-  if (workspaceFolderUri?.startsWith("file://")) {
-    workspaceFolder = fileURLToPath(workspaceFolderUri);
-  } else {
-    workspaceFolder = workspaceFolderUri;
+function notifyMarkersChanged(uri?: string): void {
+  connection.sendNotification(MARKERS_CHANGED, { uri });
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").toLowerCase();
+}
+
+function workspaceFolderUriToPath(uri: string): string | undefined {
+  if (uri.startsWith("file://")) {
+    return fileURLToPath(uri);
+  }
+  return undefined;
+}
+
+function syncWorkspaceFoldersFromUris(uris: string[]): void {
+  workspaceFolders = uris
+    .map(workspaceFolderUriToPath)
+    .filter((path): path is string => path !== undefined);
+}
+
+function getWorkspaceFolderForUri(uri: string): string | undefined {
+  if (workspaceFolders.length === 0) {
+    return undefined;
   }
 
-  // Store client name for feature detection
-  clientName = params.clientInfo?.name;
+  const filePath = uriToFileName(uri);
+  const normalizedFile = normalizePath(filePath);
 
-  // Check for tooltip format preference in initialization options
-  const initOptions = params.initializationOptions as { tooltipFormat?: TooltipFormat } | undefined;
-  if (initOptions?.tooltipFormat === "html" || initOptions?.tooltipFormat === "markdown") {
-    tooltipFormat = initOptions.tooltipFormat;
+  let best: string | undefined;
+  for (const folder of workspaceFolders) {
+    const normalizedFolder = normalizePath(folder);
+    if (
+      normalizedFile === normalizedFolder ||
+      normalizedFile.startsWith(`${normalizedFolder}/`)
+    ) {
+      if (!best || normalizedFolder.length > normalizePath(best).length) {
+        best = folder;
+      }
+    }
   }
 
-  const hoverEnabled = shouldEnableHover(clientName);
+  return best;
+}
 
-  logMessage(
-    `Client connected: ${clientName ?? "Unknown"} ${params.clientInfo?.version ?? ""} (tooltipFormat: ${tooltipFormat}, hover: ${hoverEnabled ? "enabled" : "disabled"})`
-  );
+function uriToFileName(uri: string): string {
+  if (!uri.startsWith("file://")) {
+    return uri;
+  }
+  return fileURLToPath(uri);
+}
+
+interface DocumentProcessContext {
+  document: TextDocument;
+  fileName: string;
+  workspaceFolder: string;
+}
+
+function getDocumentProcessContext(uri: string): DocumentProcessContext | null {
+  if (!isActivated) {
+    return null;
+  }
+
+  if (!uri.startsWith("file://")) {
+    return null;
+  }
+
+  const folder = getWorkspaceFolderForUri(uri);
+  if (!folder) {
+    return null;
+  }
+
+  const document = documents.get(uri);
+  if (!document) {
+    return null;
+  }
+
+  if (!isReactLanguageId(document.languageId)) {
+    return null;
+  }
 
   return {
+    document,
+    fileName: uriToFileName(uri),
+    workspaceFolder: folder,
+  };
+}
+
+function computeMarkers(document: TextDocument, folder: string) {
+  const fileNameForCompiler = uriToFileName(document.uri);
+  const sourceCode = document.getText();
+
+  const { successfulCompilations, failedCompilations, skippedCompilations } = checkReactCompiler(
+    sourceCode,
+    fileNameForCompiler,
+    folder,
+    globalSettings.babelPluginPath,
+    globalSettings.configFile
+  );
+
+  return generateMarkers(
+    document,
+    successfulCompilations,
+    failedCompilations,
+    skippedCompilations
+  );
+}
+
+connection.onInitialize((params: InitializeParams): InitializeResult => {
+  hasWorkspaceFolderCapability = !!params.capabilities.workspace?.workspaceFolders;
+
+  if (params.workspaceFolders) {
+    syncWorkspaceFoldersFromUris(params.workspaceFolders.map((folder) => folder.uri));
+  }
+
+  clientName = params.clientInfo?.name;
+
+  const initOptions = params.initializationOptions as ClientInitializationOptions | undefined;
+  if (typeof initOptions?.isActivated === "boolean") {
+    isActivated = initOptions.isActivated;
+  }
+
+  logMessage(
+    `Client connected: ${clientName ?? "Unknown"} ${params.clientInfo?.version ?? ""} (activated: ${isActivated})`
+  );
+
+  const result: InitializeResult = {
     serverInfo: {
       name: "React Compiler Marker LSP",
       version,
     },
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
-      inlayHintProvider: true,
-      hoverProvider: hoverEnabled,
       executeCommandProvider: {
         commands: [
           "react-compiler-marker/activate",
           "react-compiler-marker/deactivate",
           "react-compiler-marker/getCompiledOutput",
           "react-compiler-marker/checkOnce",
-          "react-compiler-marker/generateReport",
-          "react-compiler-marker/generateReportHtml",
+          "react-compiler-marker/reloadReactCompilerConfig",
         ],
       },
     },
   };
+
+  if (hasWorkspaceFolderCapability) {
+    result.capabilities.workspace = {
+      workspaceFolders: {
+        supported: true,
+      },
+    };
+  }
+
+  return result;
 });
 
 connection.onInitialized(() => {
   logMessage("React Compiler Marker LSP Server initialized");
+
+  if (hasWorkspaceFolderCapability) {
+    connection.workspace.onDidChangeWorkspaceFolders((event) => {
+      for (const folder of event.removed) {
+        const path = workspaceFolderUriToPath(folder.uri);
+        if (path) {
+          const normalized = normalizePath(path);
+          workspaceFolders = workspaceFolders.filter((f) => normalizePath(f) !== normalized);
+        }
+      }
+      for (const folder of event.added) {
+        const path = workspaceFolderUriToPath(folder.uri);
+        if (path && !workspaceFolders.some((f) => normalizePath(f) === normalizePath(path))) {
+          workspaceFolders.push(path);
+        }
+      }
+      logMessage(`Workspace folders updated: ${workspaceFolders.length} folder(s)`);
+      notifyMarkersChanged();
+    });
+  }
 });
 
 // Handle configuration changes
@@ -140,13 +254,10 @@ connection.onDidChangeConfiguration((change) => {
   const settings = change.settings?.reactCompilerMarker;
   if (settings) {
     const oldBabelPluginPath = globalSettings.babelPluginPath;
-    const oldCompilationMode = globalSettings.compilationMode;
+    const oldConfigFile = globalSettings.configFile;
     globalSettings = {
-      successEmoji: settings.successEmoji ?? "✨",
-      errorEmoji: settings.errorEmoji ?? "🚫",
-      skippedEmoji: settings.skippedEmoji ?? "⏭️",
-      babelPluginPath: settings.babelPluginPath ?? "node_modules/babel-plugin-react-compiler",
-      compilationMode: normalizeCompilationMode(settings.compilationMode),
+      babelPluginPath: settings.babelPluginPath ?? DEFAULT_BABEL_PLUGIN_PATH,
+      configFile: settings.configFile ?? DEFAULT_REACT_COMPILER_CONFIG_FILE,
     };
 
     // Clear caches if babel plugin path changed
@@ -155,130 +266,27 @@ connection.onDidChangeConfiguration((change) => {
       clearCompilationCache();
     }
 
-    // Compilation cache is keyed by source+filename only — invalidate on mode change
-    if (oldCompilationMode !== globalSettings.compilationMode) {
+    if (oldConfigFile !== globalSettings.configFile) {
+      clearReactCompilerConfigCache();
       clearCompilationCache();
     }
   }
-  // Refresh inlay hints on all documents
-  connection.languages.inlayHint.refresh();
+  notifyMarkersChanged();
 });
 
-// Handle inlay hints request with debouncing
-connection.languages.inlayHint.on(async (params: InlayHintParams): Promise<InlayHint[] | null> => {
-  if (!isActivated) {
+connection.onRequest(MARKER_REQUEST, async (params: { uri: string }) => {
+  const context = getDocumentProcessContext(params.uri);
+  if (!context) {
     return null;
   }
 
-  const document = documents.get(params.textDocument.uri);
-  if (!document) {
-    return null;
-  }
-
-  // Only process JS/TS/JSX/TSX files
-  const languageId = document.languageId;
-  if (!["javascript", "typescript", "javascriptreact", "typescriptreact"].includes(languageId)) {
-    return null;
-  }
-
-  // Use document URI as the debounce key
-  return debounce(params.textDocument.uri, () => {
-    logMessage(`Process inlay hints for ${params.textDocument.uri}`);
-    const fileName = params.textDocument.uri;
-    const fileNameForCompiler = fileName.startsWith("file://") ? fileName.slice(7) : fileName;
-
-    try {
-      const sourceCode = document.getText();
-
-      const { successfulCompilations, failedCompilations, skippedCompilations } =
-        checkReactCompiler(
-          sourceCode,
-          fileNameForCompiler,
-          workspaceFolder,
-          globalSettings.babelPluginPath,
-          globalSettings.compilationMode
-        );
-
-      return generateInlayHints(
-        document,
-        successfulCompilations,
-        failedCompilations,
-        skippedCompilations,
-        globalSettings.successEmoji,
-        globalSettings.errorEmoji,
-        globalSettings.skippedEmoji,
-        params.textDocument.uri,
-        tooltipFormat,
-        clientName
-      );
-    } catch (error: any) {
-      logError(`Error checking React Compiler: ${error?.message}`);
-      return null;
-    }
-  });
-});
-
-// Handle hover request (only enabled for Neovim client, as VSCode/IntelliJ have native inlay hint hover)
-connection.onHover((params: HoverParams): Hover | null => {
-  if (!isActivated) {
-    return null;
-  }
-
-  const document = documents.get(params.textDocument.uri);
-  if (!document) {
-    return null;
-  }
-
-  // Only process JS/TS/JSX/TSX files
-  const languageId = document.languageId;
-  if (!["javascript", "typescript", "javascriptreact", "typescriptreact"].includes(languageId)) {
-    return null;
-  }
-
-  const fileName = params.textDocument.uri;
-  const fileNameForCompiler = fileName.startsWith("file://") ? fileName.slice(7) : fileName;
-  const hoveredLine = params.position.line;
-
+  logMessage(`Process markers for ${params.uri}`);
   try {
-    const sourceCode = document.getText();
-
-    const { successfulCompilations, failedCompilations, skippedCompilations } =
-      checkReactCompiler(
-        sourceCode,
-        fileNameForCompiler,
-        workspaceFolder,
-        globalSettings.babelPluginPath,
-        globalSettings.compilationMode
-      );
-
-    // Generate hints to find which components have hints on which lines
-    const hints = generateInlayHints(
-      document,
-      successfulCompilations,
-      failedCompilations,
-      skippedCompilations,
-      globalSettings.successEmoji,
-      globalSettings.errorEmoji,
-      globalSettings.skippedEmoji,
-      params.textDocument.uri,
-      tooltipFormat,
-      clientName
-    );
-
-    // Find hint on the hovered line
-    const hintOnLine = hints.find((hint) => hint.position.line === hoveredLine);
-
-    if (hintOnLine && hintOnLine.tooltip) {
-      // Return the tooltip as hover content
-      return {
-        contents: hintOnLine.tooltip,
-      };
-    }
-
-    return null;
-  } catch (error: any) {
-    logError(`Error in hover: ${error?.message}`);
-    return null;
+    return computeMarkers(context.document, context.workspaceFolder);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logError(`Error checking React Compiler: ${message}`);
+    return [];
   }
 });
 
@@ -287,134 +295,54 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
   switch (params.command) {
     case "react-compiler-marker/activate":
       isActivated = true;
-      connection.languages.inlayHint.refresh();
+      notifyMarkersChanged();
       return { success: true, activated: true };
 
     case "react-compiler-marker/deactivate":
       isActivated = false;
-      connection.languages.inlayHint.refresh();
+      notifyMarkersChanged();
       return { success: true, activated: false };
 
     case "react-compiler-marker/getCompiledOutput": {
       const [uri] = params.arguments ?? [];
-      if (!uri) {
+      if (!uri || typeof uri !== "string") {
         return { success: false, error: "No URI provided" };
       }
 
-      const document = documents.get(uri);
-      if (!document) {
-        return { success: false, error: "Document not found" };
+      const context = getDocumentProcessContext(uri);
+      if (!context) {
+        return {
+          success: false,
+          error:
+            "Document is not available for compilation (save the file, open a workspace, or activate the extension)",
+        };
       }
 
-      const fileUri = uri.startsWith("file://") ? uri.slice(7) : uri;
       try {
         const compiled = await getCompiledOutput(
-          document.getText(),
-          fileUri,
-          workspaceFolder,
+          context.document.getText(),
+          context.fileName,
+          context.workspaceFolder,
           globalSettings.babelPluginPath,
-          globalSettings.compilationMode
+          globalSettings.configFile
         );
         return { success: true, code: compiled };
-      } catch (error: any) {
-        return { success: false, error: error?.message };
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: message };
       }
     }
 
     case "react-compiler-marker/checkOnce": {
-      // Force refresh inlay hints
-      connection.languages.inlayHint.refresh();
+      notifyMarkersChanged();
       return { success: true };
     }
 
-    case "react-compiler-marker/generateReport": {
-      // Generate JSON data report
-      const [options] = params.arguments ?? [];
-      const reportRoot = options?.root ?? workspaceFolder;
-      if (!reportRoot) {
-        return { success: false, error: "No workspace folder available" };
-      }
-      const reportId = options?.reportId;
-      try {
-        logMessage(`Generating report for ${reportRoot}`);
-        const report = await generateReport({
-          root: reportRoot,
-          babelPluginPath: globalSettings.babelPluginPath,
-          compilationMode: normalizeCompilationMode(
-            options?.compilationMode ?? globalSettings.compilationMode
-          ),
-          maxConcurrency: options?.maxConcurrency,
-          includeExtensions: options?.includeExtensions,
-          excludeDirs: options?.excludeDirs,
-          respectGitignore: options?.respectGitignore,
-          onProgress: reportId
-            ? (progress) => {
-                connection.sendNotification("react-compiler-marker/reportProgress", {
-                  reportId,
-                  ...progress,
-                });
-              }
-            : undefined,
-        });
-        logMessage(
-          `Report generated: scanned=${report.totals.filesScanned} files=${report.totals.filesWithResults} success=${report.totals.successCount} failed=${report.totals.failedCount} skipped=${report.totals.skippedCount}`
-        );
-        return { success: true, report };
-      } catch (error: any) {
-        logError(`Report generation failed: ${error?.message ?? error}`);
-        return { success: false, error: error?.message ?? "Failed to generate report" };
-      }
-    }
-    case "react-compiler-marker/generateReportHtml": {
-      // Generate report and return self-contained HTML page
-      const [htmlOptions] = params.arguments ?? [];
-      const htmlReportRoot = htmlOptions?.root ?? workspaceFolder;
-      if (!htmlReportRoot) {
-        return { success: false, error: "No workspace folder available" };
-      }
-      const htmlReportId = htmlOptions?.reportId;
-      try {
-        logMessage(`Generating HTML report for ${htmlReportRoot}`);
-        const report = await generateReport({
-          root: htmlReportRoot,
-          babelPluginPath: globalSettings.babelPluginPath,
-          compilationMode: normalizeCompilationMode(
-            htmlOptions?.compilationMode ?? globalSettings.compilationMode
-          ),
-          maxConcurrency: htmlOptions?.maxConcurrency,
-          includeExtensions: htmlOptions?.includeExtensions,
-          excludeDirs: htmlOptions?.excludeDirs,
-          respectGitignore: htmlOptions?.respectGitignore,
-          onProgress: htmlReportId
-            ? (progress) => {
-                connection.sendNotification("react-compiler-marker/reportProgress", {
-                  reportId: htmlReportId,
-                  ...progress,
-                });
-              }
-            : undefined,
-        });
-        const treeData = buildReportTree(report);
-        const emojis = {
-          success: htmlOptions?.emojis?.success ?? globalSettings.successEmoji ?? "✨",
-          error: htmlOptions?.emojis?.error ?? globalSettings.errorEmoji ?? "🚫",
-          skipped: htmlOptions?.emojis?.skipped ?? globalSettings.skippedEmoji ?? "⏭️",
-        };
-        const html = getReportHtml({
-          data: treeData,
-          emojis,
-          theme: htmlOptions?.theme,
-          headExtra: htmlOptions?.headExtra,
-          scriptExtra: htmlOptions?.scriptExtra,
-        });
-        logMessage(
-          `HTML report generated: scanned=${report.totals.filesScanned} files=${report.totals.filesWithResults} success=${report.totals.successCount} failed=${report.totals.failedCount} skipped=${report.totals.skippedCount}`
-        );
-        return { success: true, html, report };
-      } catch (error: any) {
-        logError(`HTML report generation failed: ${error?.message ?? error}`);
-        return { success: false, error: error?.message ?? "Failed to generate report" };
-      }
+    case "react-compiler-marker/reloadReactCompilerConfig": {
+      clearReactCompilerConfigCache();
+      clearCompilationCache();
+      notifyMarkersChanged();
+      return { success: true };
     }
 
     default:

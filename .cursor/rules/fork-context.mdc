@@ -1,0 +1,20 @@
+---
+description: Fork context — VS Code-only, no upstream contributions
+alwaysApply: true
+---
+
+# Fork context
+
+This repository is a **personal fork** of [blazejkustra/react-compiler-marker](https://github.com/blazejkustra/react-compiler-marker). It is **not** maintained for upstream contribution.
+
+## Scope
+
+- **VS Code extension only** — `packages/vscode-client` plus shared `packages/server`.
+- **Removed intentionally** — IntelliJ/WebStorm, Neovim, and Zed clients were deleted. Do **not** restore them or reintroduce multi-IDE support unless the user explicitly asks.
+
+## When making changes
+
+- Optimize for this fork's VS Code workflow, not feature parity with upstream or other IDEs.
+- Do not suggest opening PRs to the origin repo or reverting deletions to ease upstream merge.
+- **This fork does not use pull requests** — merge feature branches directly into `main` when the user asks.
+- Upstream links in docs or `package.json` should point to [pavel-pargachev/react-compiler-marker](https://github.com/pavel-pargachev/react-compiler-marker); credit [blazejkustra/react-compiler-marker](https://github.com/blazejkustra/react-compiler-marker) as the original project where appropriate.

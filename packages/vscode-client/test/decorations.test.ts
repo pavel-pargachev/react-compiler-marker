@@ -1,36 +1,6 @@
 import * as assert from "assert";
-import * as fs from "fs";
 import * as path from "path";
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { checkReactCompiler } = require(path.join(__dirname, "..", "..", "..", "server", "out", "checkReactCompiler"));
-
-function readFixture(name: string): string {
-  const candidates = [
-    path.join(__dirname, "fixtures", name),
-    // When running compiled tests from out/test, jump back to test fixtures
-    path.join(__dirname, "..", "..", "test", "fixtures", name),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      return fs.readFileSync(p, "utf8");
-    }
-  }
-  throw new Error(
-    `Fixture not found: ${name} in any of: \n${candidates.join("\n")}`
-  );
-}
-
-// Helper to call checkReactCompiler with test defaults
-function compileFixture(text: string, filename: string, compilationMode?: string) {
-  return checkReactCompiler(
-    text,
-    filename,
-    undefined, // workspaceFolder
-    "node_modules/babel-plugin-react-compiler", // babelPluginPath
-    compilationMode
-  );
-}
+import { compileFixture, readFixture } from "./helpers";
 
 suite("React Compiler detection for export styles", () => {
   interface Case {
@@ -166,23 +136,27 @@ suite("Critical error handling", () => {
     }
   });
 
-  test('annotation-mode.tsx: only "use memo" components compile under compilationMode: "annotation"', () => {
+  test('annotation-mode.tsx: only "use memo" components compile with annotation override options', () => {
     const text = readFixture("annotation-mode.tsx").trim();
     const filename = "/mock/annotation-mode.tsx";
 
-    const inferred = compileFixture(text, filename, "infer");
+    const inferred = compileFixture(text, filename);
     assert.strictEqual(
       inferred.successfulCompilations.length,
       2,
-      `Expected 2 compiled components under "infer", got ${inferred.successfulCompilations.length}`
+      `Expected 2 compiled components with default options, got ${inferred.successfulCompilations.length}`
     );
 
-    // Cache is keyed by source+filename; vary filename so we get a fresh run for "annotation".
-    const annotated = compileFixture(text, "/mock/annotation-mode-annotation.tsx", "annotation");
+    // Cache is keyed by source+filename+options; vary filename for annotation override run.
+    const annotated = compileFixture(
+      text,
+      "/mock/annotation-mode-annotation.tsx",
+      "react-compiler-annotation.cjs"
+    );
     assert.strictEqual(
       annotated.successfulCompilations.length,
       1,
-      `Expected only the "use memo" component to compile under "annotation", got ${annotated.successfulCompilations.length}`
+      `Expected only the "use memo" component to compile with annotation options, got ${annotated.successfulCompilations.length}`
     );
     const compiled = annotated.successfulCompilations[0];
     assert.ok(

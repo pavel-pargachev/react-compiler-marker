@@ -1,17 +1,19 @@
 {
   "name": "react-compiler-marker",
   "private": true,
-  "description": "React Compiler Marker IDE extensions",
-  "author": "Blazej Kustra <kustrablazej@gmail.com>",
+  "description": "React Compiler Marker VS Code extension",
+  "author": "Pavel Pargachev <pargachev@gmail.com>",
+  "contributors": [
+    "Blazej Kustra <kustrablazej@gmail.com>"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/blazejkustra/react-compiler-marker"
+    "url": "https://github.com/pavel-pargachev/react-compiler-marker"
   },
   "workspaces": [
+    "packages/shared",
     "packages/server",
-    "packages/cli",
-    "packages/nvim-client",
     "packages/vscode-client"
   ],
   "scripts": {

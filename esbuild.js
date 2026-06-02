@@ -1,21 +1,17 @@
 /**
- * Build script for React Compiler Marker
+ * Build script for React Compiler Marker VS Code extension
  *
  * Usage:
- *   node esbuild.js                           - Build VS Code (dev mode)
- *   node esbuild.js --production              - Build VS Code (production)
- *   BUILD_TARGET=nvim node esbuild.js --production  - Build for Neovim
- *   BUILD_TARGET=zed node esbuild.js --production   - Build for Zed
- *   node esbuild.js --watch                   - Watch mode for VS Code
+ *   node esbuild.js                           - Build (dev mode)
+ *   node esbuild.js --production              - Build (production)
+ *   node esbuild.js --watch                   - Watch mode
  */
 const esbuild = require("esbuild");
 const path = require("path");
 
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
-const buildTarget = process.env.BUILD_TARGET || "vscode";
 
-// Resolve paths relative to this file's location (repo root)
 const rootDir = __dirname;
 
 /**
@@ -42,9 +38,6 @@ const esbuildProblemMatcherPlugin = {
   },
 };
 
-/**
- * Shared build options
- */
 const sharedOptions = {
   bundle: true,
   format: "cjs",
@@ -57,55 +50,29 @@ const sharedOptions = {
 };
 
 async function main() {
-  console.log(`Building for ${buildTarget}...`);
+  console.log("Building VS Code extension...");
 
-  const contexts = [];
+  const serverCtx = await esbuild.context({
+    ...sharedOptions,
+    entryPoints: [path.join(rootDir, "packages/server/src/server.ts")],
+    outfile: path.join(rootDir, "packages/vscode-client/dist/server.js"),
+    external: [],
+  });
 
-  // Build CLI
-  if (buildTarget === "cli") {
-    const cliCtx = await esbuild.context({
-      ...sharedOptions,
-      entryPoints: [path.join(rootDir, "packages/cli/src/main.ts")],
-      outfile: path.join(rootDir, "packages/cli/out/main.js"),
-      external: [],
-      alias: {
-        "@react-compiler-marker/server": path.join(rootDir, "packages/server"),
-      },
-    });
-    contexts.push(cliCtx);
-  }
+  const clientCtx = await esbuild.context({
+    ...sharedOptions,
+    entryPoints: [path.join(rootDir, "packages/vscode-client/src/extension.ts")],
+    outfile: path.join(rootDir, "packages/vscode-client/dist/extension.js"),
+    external: ["vscode"],
+  });
 
-  // Build the LSP server (all targets except cli)
-  if (buildTarget !== "cli") {
-    const serverCtx = await esbuild.context({
-      ...sharedOptions,
-      entryPoints: [path.join(rootDir, "packages/server/src/server.ts")],
-      outfile: buildTarget === "zed"
-        ? path.join(rootDir, "packages/zed-client/server/server.bundle.js")
-        : buildTarget === "nvim"
-          ? path.join(rootDir, "packages/nvim-client/server/server.bundle.js")
-          : path.join(rootDir, "packages/vscode-client/dist/server.js"),
-      external: [],
-    });
-    contexts.push(serverCtx);
-  }
-
-  // Build VS Code client extension only for vscode target
-  if (buildTarget === "vscode") {
-    const clientCtx = await esbuild.context({
-      ...sharedOptions,
-      entryPoints: [path.join(rootDir, "packages/vscode-client/src/extension.ts")],
-      outfile: path.join(rootDir, "packages/vscode-client/dist/extension.js"),
-      external: ["vscode"],
-    });
-    contexts.push(clientCtx);
-  }
+  const contexts = [serverCtx, clientCtx];
 
   if (watch) {
-    await Promise.all(contexts.map(ctx => ctx.watch()));
+    await Promise.all(contexts.map((ctx) => ctx.watch()));
   } else {
-    await Promise.all(contexts.map(ctx => ctx.rebuild()));
-    await Promise.all(contexts.map(ctx => ctx.dispose()));
+    await Promise.all(contexts.map((ctx) => ctx.rebuild()));
+    await Promise.all(contexts.map((ctx) => ctx.dispose()));
   }
 }
 

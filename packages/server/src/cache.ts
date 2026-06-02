@@ -1,24 +1,20 @@
 import * as crypto from "crypto";
 
-interface CacheEntry<T> {
-  result: T;
-}
-
 export class LRUCache<T> {
-  private cache: Map<string, CacheEntry<T>> = new Map();
+  private cache: Map<string, T> = new Map();
   private maxSize: number;
 
   constructor(maxSize: number = 100) {
     this.maxSize = maxSize;
   }
 
-  private generateKey(content: string, filename: string): string {
+  private generateKey(content: string, filename: string, optionsKey: string = ""): string {
     const hash = crypto.createHash("md5").update(content).digest("hex");
-    return `${filename}:${hash}`;
+    return `${filename}:${hash}:${optionsKey}`;
   }
 
-  get(content: string, filename: string): T | undefined {
-    const key = this.generateKey(content, filename);
+  get(content: string, filename: string, optionsKey: string = ""): T | undefined {
+    const key = this.generateKey(content, filename, optionsKey);
     const entry = this.cache.get(key);
 
     if (!entry) {
@@ -29,11 +25,11 @@ export class LRUCache<T> {
     this.cache.delete(key);
     this.cache.set(key, entry);
 
-    return entry.result;
+    return entry;
   }
 
-  set(content: string, filename: string, result: T): void {
-    const key = this.generateKey(content, filename);
+  set(content: string, filename: string, optionsKey: string, result: T): void {
+    const key = this.generateKey(content, filename, optionsKey);
 
     // Remove oldest entries if at capacity
     if (this.cache.size >= this.maxSize) {
@@ -43,7 +39,7 @@ export class LRUCache<T> {
       }
     }
 
-    this.cache.set(key, { result });
+    this.cache.set(key, result);
   }
 
   clear(): void {

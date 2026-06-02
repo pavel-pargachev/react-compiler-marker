@@ -6,5 +6,5 @@
     "types": ["vscode", "node", "mocha"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "references": [{ "path": "../server" }]
+  "references": [{ "path": "../shared" }, { "path": "../server" }]
 }

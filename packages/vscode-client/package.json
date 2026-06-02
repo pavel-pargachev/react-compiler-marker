@@ -1,10 +1,13 @@
 {
   "name": "react-compiler-marker",
-  "displayName": "React Compiler Marker ✨",
+  "displayName": "React Compiler Marker",
   "description": "Highlights components optimized by the React Compiler, providing visual cues to make the optimization process more transparent during development.",
-  "version": "2.2.0",
-  "author": "Blazej Kustra <kustrablazej@gmail.com>",
-  "publisher": "blazejkustra",
+  "version": "2.2.65",
+  "author": "Pavel Pargachev <pargachev@gmail.com>",
+  "contributors": [
+    "Blazej Kustra <kustrablazej@gmail.com>"
+  ],
+  "publisher": "pavel-pargachev",
   "license": "MIT",
   "keywords": [
     "react",
@@ -17,7 +20,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/blazejkustra/react-compiler-marker"
+    "url": "https://github.com/pavel-pargachev/react-compiler-marker"
   },
   "engines": {
     "vscode": "^1.95.0"
@@ -31,36 +34,41 @@
     "onLanguage:javascript",
     "onLanguage:typescript",
     "onLanguage:javascriptreact",
-    "onLanguage:typescriptreact",
-    "onView:react-compiler-marker.reportsView"
+    "onLanguage:typescriptreact"
   ],
   "main": "./dist/extension.js",
   "icon": "logo.jpeg",
   "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "react-compiler-marker",
-          "title": "React Compiler Marker",
-          "icon": "media/activity-icon.svg"
-        }
-      ]
-    },
-    "views": {
-      "react-compiler-marker": [
-        {
-          "id": "react-compiler-marker.reportsView",
-          "name": "Reports",
-          "contextualTitle": "React Compiler Marker"
-        }
-      ]
-    },
-    "viewsWelcome": [
+    "languages": [
       {
-        "view": "react-compiler-marker.reportsView",
-        "contents": "No reports generated yet.\n\nScan your project to see which components are optimized by the React Compiler.\n[$(add) Generate Report](command:react-compiler-marker.generateReport)"
+        "id": "reactCompilerCompiledPreview",
+        "aliases": [
+          "React Compiler Compiled Preview"
+        ],
+        "extensions": [
+          ".react-compiler-preview.ts",
+          ".react-compiler-preview.tsx",
+          ".react-compiler-preview.js",
+          ".react-compiler-preview.jsx"
+        ]
       }
     ],
+    "grammars": [
+      {
+        "language": "reactCompilerCompiledPreview",
+        "scopeName": "source.react-compiler-preview",
+        "path": "./syntaxes/react-compiler-preview.json"
+      }
+    ],
+    "configurationDefaults": {
+      "problems.exclude": {
+        "react-compiler-preview:/**": true,
+        "react-compiler-format-scratch:/**": true
+      },
+      "[reactCompilerCompiledPreview]": {
+        "editor.semanticHighlighting.enabled": false
+      }
+    },
     "commands": [
       {
         "command": "react-compiler-marker.activate",
@@ -81,135 +89,20 @@
         "command": "react-compiler-marker.previewCompiled",
         "title": "Preview Compiled Output",
         "category": "React Compiler Marker"
-      },
-      {
-        "command": "react-compiler-marker.generateReport",
-        "title": "Generate Report",
-        "category": "React Compiler Marker",
-        "icon": "$(add)"
-      },
-      {
-        "command": "react-compiler-marker.refreshReports",
-        "title": "Refresh Reports List",
-        "category": "React Compiler Marker",
-        "icon": "$(refresh)"
-      },
-      {
-        "command": "react-compiler-marker.openReport",
-        "title": "Open Report",
-        "category": "React Compiler Marker"
-      },
-      {
-        "command": "react-compiler-marker.deleteReport",
-        "title": "Delete Report",
-        "category": "React Compiler Marker",
-        "icon": "$(trash)"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "react-compiler-marker.generateReport",
-          "when": "view == react-compiler-marker.reportsView",
-          "group": "navigation"
-        },
-        {
-          "command": "react-compiler-marker.refreshReports",
-          "when": "view == react-compiler-marker.reportsView",
-          "group": "navigation"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "react-compiler-marker.deleteReport",
-          "when": "view == react-compiler-marker.reportsView && viewItem == reportItem",
-          "group": "inline"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "react-compiler-marker.openReport",
-          "when": "false"
-        },
-        {
-          "command": "react-compiler-marker.deleteReport",
-          "when": "false"
-        }
-      ]
-    },
     "configuration": {
       "title": "React Compiler Marker",
       "properties": {
         "reactCompilerMarker.babelPluginPath": {
           "type": "string",
           "default": "node_modules/babel-plugin-react-compiler",
-          "description": "Path to the babel-plugin-react-compiler in your project. By default it's 'node_modules/babel-plugin-react-compiler'"
+          "description": "Path to the babel-plugin-react-compiler in your project."
         },
-        "reactCompilerMarker.respectGitignore": {
-          "type": "boolean",
-          "default": true,
-          "description": "Respect .gitignore rules when scanning files for report generation"
-        },
-        "reactCompilerMarker.excludedDirectories": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "node_modules",
-            ".git",
-            "dist",
-            "build",
-            "out",
-            "coverage",
-            ".next",
-            ".turbo"
-          ],
-          "description": "Directories to exclude when generating reports"
-        },
-        "reactCompilerMarker.supportedExtensions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            ".js",
-            ".jsx",
-            ".ts",
-            ".tsx",
-            ".mjs",
-            ".cjs"
-          ],
-          "description": "File extensions to include when generating reports"
-        },
-        "reactCompilerMarker.errorEmoji": {
+        "reactCompilerMarker.configFile": {
           "type": "string",
-          "nullable": true,
-          "default": "🚫",
-          "description": "Emoji marker to display next to components that failed to be memoized"
-        },
-        "reactCompilerMarker.successEmoji": {
-          "type": "string",
-          "nullable": true,
-          "default": "✨",
-          "description": "Emoji marker to display next to components that were successfully memoized"
-        },
-        "reactCompilerMarker.skippedEmoji": {
-          "type": "string",
-          "nullable": true,
-          "default": "⏭️",
-          "description": "Emoji marker to display next to components that opted out via the \"use no memo\" directive"
-        },
-        "reactCompilerMarker.compilationMode": {
-          "type": "string",
-          "enum": [
-            "infer",
-            "annotation",
-            "syntax",
-            "all"
-          ],
-          "default": "infer",
-          "markdownDescription": "Controls which functions React Compiler attempts to compile. Match this to your project's babel-plugin-react-compiler configuration. See [compilationMode docs](https://react.dev/reference/react-compiler/compilationMode)."
+          "default": ".config/react-compiler.ts",
+          "markdownDescription": "Workspace-relative path to a module that exports `reactCompilerPaths` (string array). This list defines parts of the code that use compilationMode=infer, the rest of the code uses annotation mode (`'use memo'` opt-in)."
         }
       }
     }
@@ -226,20 +119,19 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "typecheck": "tsc -b",
     "lint": "eslint \"src/**/*.ts\" \"../../packages/server/src/**/*.ts\"",
-    "test": "vscode-test",
-    "publish:vscode": "vsce publish -p $VSCE_PAT",
-    "publish:ovsx": "npx ovsx publish -p $OVSX_PAT"
+    "test": "vscode-test"
   },
   "dependencies": {
+    "@react-compiler-marker/shared": "*",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.9",
-    "@types/vscode": "^1.95.0",
     "@types/node": "20.x",
+    "@types/vscode": "^1.95.0",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.4.1",
-    "@vscode/vsce": "^3.2.1",
+    "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.24.0",
     "npm-run-all2": "^8.0.4"
   }
